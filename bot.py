@@ -6,12 +6,12 @@ import subprocess
 import json
 import os
 import sqlite3
-from whitelist import WHITELIST
 from dotenv import load_dotenv
+from whitelist import WHITELIST
 
 load_dotenv()
 
-API_TOKEN = os.getenv("BOT_API_TOKEN")
+API_TOKEN = os.getenv("API_TOKEN")
 
 
 bot = Bot(API_TOKEN)

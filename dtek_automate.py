@@ -9,15 +9,19 @@ dtek_automate.py
 import time
 import subprocess
 import sys
+import os
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from dotenv import load_dotenv
+
 
 # --- настройки ---
-URL = "https://www.dtek-dnem.com.ua/ua/shutdowns"
-OUTPATH = Path("./dtek_shutdowns.html")
-CITY = "М. Дніпро"
-STREET = "просп. Героїв"
-HOUSE = "8"
+load_dotenv()
+URL = os.getenv("URL")
+OUTPATH = Path(os.getenv("OUTPATH"))
+CITY = os.getenv("CITY")
+STREET = os.getenv("STREET")
+HOUSE = os.getenv("HOUSE")
 HEADLESS = True  # поставьте False для визуального дебага
 # -----------------
 

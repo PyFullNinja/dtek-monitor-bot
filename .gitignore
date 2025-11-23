@@ -1,2 +1,5 @@
 .env
+whitelist.py
+today_schedule.json
+dtek_shutdowns.json
 
