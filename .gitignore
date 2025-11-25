@@ -4,6 +4,7 @@ today_schedule.json
 dtek_shutdowns.json
 users.db
 user.db
-user-db.bak
+users-db.bak
+user-bak.db
 dtek_shutdowns.html
 .venv
