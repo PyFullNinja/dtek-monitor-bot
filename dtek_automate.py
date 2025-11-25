@@ -1,42 +1,51 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-dtek_automate.py
-Автоматизация ввода на https://www.dtek-dnem.com.ua/ua/shutdowns с помощью Playwright (sync).
-Сохраняет страницу в /mnt/data/dtek_shutdowns.html и запускает локальный парсер "main".
-"""
-
-import time
-import subprocess
-import sys
 import os
+import time
+import sys
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-from dotenv import load_dotenv
+import subprocess
 
+# === файл HTML, куда будет сохранён результат ===
+OUTPATH = Path("dtek_shutdowns.html")
 
-# --- настройки ---
-load_dotenv()
-URL = os.getenv("URL")
-OUTPATH = Path(os.getenv("OUTPATH"))
-CITY = os.getenv("CITY")
-STREET = os.getenv("STREET")
-HOUSE = os.getenv("HOUSE")
-HEADLESS = True  # поставьте False для визуального дебага
-# -----------------
+# === playwright debug ===
+HEADLESS = False   # False → для визуальной отладки
 
 
 def safe_click(locator, timeout=3000):
     try:
         locator.click(timeout=timeout)
         return True
-    except PWTimeout:
-        return False
     except Exception:
         return False
 
 
 def main():
+    # -----------------------------
+    #    ПАРАМЕТРЫ КОМАНДНОЙ СТРОКИ
+    # -----------------------------
+    #if len(sys.argv) != 4:
+    #    print("Использование:")
+    #    print("  python dtek_automate.py \"Город\" \"Улица\" \"Дом\"")
+    #    print()
+    #    print("Например:")
+    #    print("  python dtek_automate.py \"М. Дніпро\" \"просп. Героїв\" \"8\"")
+    #    sys.exit(1)
+
+    CITY = os.getenv("CITY")
+    STREET = os.getenv("STREET")
+    HOUSE = os.getenv("HOUSE")
+
+    print("🟦 Параметры автоматизации:")
+    print("   Город :", CITY)
+    print("   Улица :", STREET)
+    print("   Дом   :", HOUSE)
+    print()
+
+    URL = "https://www.dtek-dnem.com.ua/ua/shutdowns"
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
         context = browser.new_context()
@@ -45,114 +54,105 @@ def main():
         print("Открываю страницу...", URL)
         page.goto(URL, wait_until="domcontentloaded", timeout=30000)
 
-        # 1) Попробовать закрыть модалку, если она есть
+        # ---------------------------
+        #   Закрыть предупреждение
+        # ---------------------------
         try:
-            # подстраховки: 2 варианта селекторов
-            btn = page.locator("button.modal__close.m-attention__close")
-            if btn.count() > 0:
-                print("Найдено окно внимания — закрываю.")
-                safe_click(btn.first, timeout=5000)
+            modal_btn = page.locator("button.modal__close.m-attention__close")
+            if modal_btn.count() > 0:
+                print("Закрываю предупреждение.")
+                safe_click(modal_btn.first)
                 time.sleep(0.5)
             else:
-                # возможный альтернативный селектор
-                alt = page.locator(
-                    "button[aria-label='close'], button[class*='modal__close']"
-                )
+                alt = page.locator("button[aria-label='close'], button[class*='modal__close']")
                 if alt.count() > 0:
-                    print("Найден альтернативный селектор закрытия — кликаю.")
-                    safe_click(alt.first, timeout=3000)
-        except Exception as e:
-            print("Ошибка при попытке закрыть модал (игнорирую):", e)
-
-        # 2) Ввод города и выбор первого варианта
-        try:
-            print(f"Ввожу город: {CITY}")
-            page.fill("#city", CITY)
-            # ждём выпадашку — часто появляются <ul role=listbox> или .suggest...
-            # сначала даём немного времени на появление
-            page.wait_for_timeout(500)  # 0.5s
-            # пытаемся выбрать элемент с текстом 'Дніпро' (регистронезависимо)
-            if page.locator('strong:has-text("Дніпро")').count() > 0:
-                page.locator('strong:has-text("Дніпро")').first.click(timeout=5000)
-                print("Выбран вариант по strong: Дніпро")
-            else:
-                # fallback: кликаем первый элемент списка подсказок
-                if page.locator("ul[role='listbox'] li").count() > 0:
-                    page.locator("ul[role='listbox'] li").first.click(timeout=5000)
-                    print("Выбран первый вариант в списке подсказок (fallback).")
-                else:
-                    print("Подсказки для города не найдены — продолжаю.")
-            time.sleep(0.5)
-        except Exception as e:
-            print("Ошибка при выборе города (игнорируется):", e)
-
-        # 3) Ввод улицы и выбор первого варианта
-        try:
-            print(f"Ввожу улицу: {STREET}")
-            page.fill("#street", STREET)
-            page.wait_for_timeout(500)
-            # ищем любые подсказки — выбираем первый
-            if page.locator('strong:has-text("Героїв")').count() > 0:
-                page.locator('strong:has-text("Героїв")').first.click(timeout=5000)
-                print("Выбран вариант улицы (по strong).")
-            elif page.locator("ul[role='listbox'] li").count() > 0:
-                page.locator("ul[role='listbox'] li").first.click(timeout=5000)
-                print("Выбран первый вариант в списке подсказок для улицы (fallback).")
-            else:
-                print("Подсказки для улицы не найдены — продолжаю.")
-            time.sleep(0.5)
-        except Exception as e:
-            print("Ошибка при выборе улицы (игнорируется):", e)
-
-        # 4) Ввод номера дома и выбор первого варианта
-        try:
-            print(f"Ввожу номер дома: {HOUSE}")
-            page.fill("#house_num", HOUSE)
-            page.wait_for_timeout(400)
-            # иногда в подсказках li содержит текст номера — берем первый
-            if page.locator("ul[role='listbox'] li").count() > 0:
-                page.locator("ul[role='listbox'] li").first.click(timeout=4000)
-                print("Выбран первый вариант номера дома (если был).")
-            else:
-                # иногда нужно нажать Enter, чтобы применить значение
-                page.press("#house_num", "Enter")
-                print("Нажат Enter на поле house_num.")
-            time.sleep(1.0)
-        except Exception as e:
-            print("Ошибка при выборе номера дома (игнорируется):", e)
-
-        # 5) Подтвердить/отправить форму если есть кнопка submit (optional)
-        try:
-            # ищем видимую кнопку поиска/показа результатов
-            submit_sel = (
-                "button[type='submit'], button.search-button, button.btn--search"
-            )
-            if page.locator(submit_sel).count() > 0:
-                page.locator(submit_sel).first.click(timeout=3000)
-                print("Нажата кнопка submit (если была).")
-            else:
-                # если нет — пробуем press Enter на последнем поле
-                page.press("#house_num", "Enter")
-                print("Enter отправлен на поле house_num (fallback submit).")
+                    print("Закрываю альтернативное предупреждение.")
+                    safe_click(alt.first)
         except Exception:
             pass
 
-        # Подождём загрузки результатов — ждём networkidle или небольшую паузу
+        # ---------------------------
+        #   ВВОД ГОРОДА
+        # ---------------------------
+        print(f"Ввожу город: {CITY}")
+        try:
+            page.fill("#city", CITY)
+            page.wait_for_timeout(600)
+
+            # strong с названием города
+            strong_city = page.locator(f"strong:has-text(\"{CITY.split()[-1]}\")")
+            if strong_city.count() > 0:
+                strong_city.first.click(timeout=5000)
+            else:
+                # fallback – первый вариант
+                sugg = page.locator("ul[role='listbox'] li")
+                if sugg.count() > 0:
+                    sugg.first.click(timeout=5000)
+        except Exception as e:
+            print("Ошибка при выборе города:", e)
+
+        # ---------------------------
+        #   ВВОД УЛИЦЫ
+        # ---------------------------
+        print(f"Ввожу улицу: {STREET}")
+        try:
+            page.fill("#street", STREET)
+            page.wait_for_timeout(600)
+
+            strong_street = page.locator(f"strong:has-text(\"{STREET.split()[0]}\")")
+            if strong_street.count() > 0:
+                strong_street.first.click(timeout=5000)
+            else:
+                sugg = page.locator("ul[role='listbox'] li")
+                if sugg.count() > 0:
+                    sugg.first.click(timeout=5000)
+        except Exception as e:
+            print("Ошибка при выборе улицы:", e)
+
+        # ---------------------------
+        #   ВВОД ДОМА
+        # ---------------------------
+        print(f"Ввожу дом: {HOUSE}")
+        try:
+            page.fill("#house_num", HOUSE)
+            page.wait_for_timeout(500)
+
+            sugg = page.locator("ul[role='listbox'] li")
+            if sugg.count() > 0:
+                sugg.first.click(timeout=4000)
+            else:
+                page.press("#house_num", "Enter")
+        except Exception as e:
+            print("Ошибка при выборе дома:", e)
+
+        # ---------------------------
+        #   SUBMIT формы (если есть)
+        # ---------------------------
+        try:
+            submit = page.locator("button[type='submit'], button.search-button, button.btn--search")
+            if submit.count() > 0:
+                submit.first.click(timeout=3000)
+            else:
+                page.press("#house_num", "Enter")
+        except Exception:
+            pass
+
+        # Подождать обновления
         try:
             page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
-            # fallback: небольшая пауза
             time.sleep(2)
 
-        # 6) Сохраним текущий HTML в файл
+        # ---------------------------
+        #   СОХРАНЕНИЕ HTML
+        # ---------------------------
         html = page.content()
-        OUTPATH.parent.mkdir(parents=True, exist_ok=True)
         OUTPATH.write_text(html, encoding="utf-8")
-        print(f"Сохранён HTML в {OUTPATH}")
+        print(f"HTML сохранён в: {OUTPATH}")
 
-        # закрываем браузер
         context.close()
         browser.close()
+
 
     # 7) Запускаем локальный парсер "main" (в текущей папке).
     # Попробуем несколько вариантов вызова: sys.executable + 'main', затем 'main.py'
@@ -201,5 +201,11 @@ def main():
         print("Вы можете вручную выполнить: python main /mnt/data/dtek_shutdowns.html")
 
 
+
+
+    print("Готово.")
+
+
 if __name__ == "__main__":
     main()
+
