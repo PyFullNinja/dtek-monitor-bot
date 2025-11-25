@@ -3,5 +3,9 @@ whitelist.py
 today_schedule.json
 dtek_shutdowns.json
 *.db
+user.db
+users.db
+users-bak.db
+
 dtek_shutdowns.html
 .venv
