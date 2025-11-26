@@ -116,7 +116,7 @@ async def start_cmd(message: types.Message):
     if not user_exists(user_id):
         await message.answer(
             "Перед началом использования введите ваш адрес:\n"
-            "Город, улица, номер дома"
+            "Название города или села, улица, номер дома"
         )
         return
 
@@ -237,11 +237,11 @@ async def handle_messages(message: types.Message):
         )
     except Exception as e:
         # если не получилось отправить админу — сообщаем пользователю и логируем
-        await message.answer("Не удалось отправить заявку администратору. Попробуйте позже.")
+        await message.answer("Ваш индивидуальный график не удалось обработать. Попробуйте позже ❌")
         print("Failed to send admin message:", e)
         return
 
-    await message.answer("Ваша заявка отправлена администратору ✅")
+    await message.answer("Ваш индивидуальный график обрабатывается ✅")
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("approve_"))
