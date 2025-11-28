@@ -9,9 +9,10 @@ import subprocess
 
 # === файл HTML, куда будет сохранён результат ===
 OUTPATH = Path("dtek_shutdowns.html")
+OUTPATH_NEXT_DAY = Path("dtek_shutdowns_next_day.html")
 
 # === playwright debug ===
-HEADLESS = False   # False → для визуальной отладки
+HEADLESS = False  # False → для визуальной отладки
 
 
 def safe_click(locator, timeout=3000):
@@ -26,7 +27,7 @@ def main():
     # -----------------------------
     #    ПАРАМЕТРЫ КОМАНДНОЙ СТРОКИ
     # -----------------------------
-    #if len(sys.argv) != 4:
+    # if len(sys.argv) != 4:
     #    print("Использование:")
     #    print("  python dtek_automate.py \"Город\" \"Улица\" \"Дом\"")
     #    print()
@@ -37,6 +38,7 @@ def main():
     CITY = os.getenv("CITY")
     STREET = os.getenv("STREET")
     HOUSE = os.getenv("HOUSE")
+    NEXT_DAY = os.getenv("NEXT_DAY", "0") == "1"
 
     print("🟦 Параметры автоматизации:")
     print("   Город :", CITY)
@@ -64,7 +66,9 @@ def main():
                 safe_click(modal_btn.first)
                 time.sleep(0.5)
             else:
-                alt = page.locator("button[aria-label='close'], button[class*='modal__close']")
+                alt = page.locator(
+                    "button[aria-label='close'], button[class*='modal__close']"
+                )
                 if alt.count() > 0:
                     print("Закрываю альтернативное предупреждение.")
                     safe_click(alt.first)
@@ -80,7 +84,7 @@ def main():
             page.wait_for_timeout(600)
 
             # strong с названием города
-            strong_city = page.locator(f"strong:has-text(\"{CITY.split()[-1]}\")")
+            strong_city = page.locator(f'strong:has-text("{CITY.split()[-1]}")')
             if strong_city.count() > 0:
                 strong_city.first.click(timeout=5000)
             else:
@@ -99,7 +103,7 @@ def main():
             page.fill("#street", STREET)
             page.wait_for_timeout(600)
 
-            strong_street = page.locator(f"strong:has-text(\"{STREET.split()[0]}\")")
+            strong_street = page.locator(f'strong:has-text("{STREET.split()[0]}")')
             if strong_street.count() > 0:
                 strong_street.first.click(timeout=5000)
             else:
@@ -129,7 +133,9 @@ def main():
         #   SUBMIT формы (если есть)
         # ---------------------------
         try:
-            submit = page.locator("button[type='submit'], button.search-button, button.btn--search")
+            submit = page.locator(
+                "button[type='submit'], button.search-button, button.btn--search"
+            )
             if submit.count() > 0:
                 submit.first.click(timeout=3000)
             else:
@@ -146,13 +152,19 @@ def main():
         # ---------------------------
         #   СОХРАНЕНИЕ HTML
         # ---------------------------
-        html = page.content()
-        OUTPATH.write_text(html, encoding="utf-8")
-        print(f"HTML сохранён в: {OUTPATH}")
+        #
+        if NEXT_DAY:
+            page.locator("div.date", has_text="на завтра").click()
+            html_next = page.content()
+            OUTPATH.write_text(html_next, encoding="utf-8")
+            print(f"HTML на следующий день сохранён в: {OUTPATH}")
+        else:
+            html = page.content()
+            OUTPATH.write_text(html, encoding="utf-8")
+            print(f"HTML сохранён в: {OUTPATH}")
 
         context.close()
         browser.close()
-
 
     # 7) Запускаем локальный парсер "main" (в текущей папке).
     # Попробуем несколько вариантов вызова: sys.executable + 'main', затем 'main.py'
@@ -200,12 +212,8 @@ def main():
         )
         print("Вы можете вручную выполнить: python main /mnt/data/dtek_shutdowns.html")
 
-
-
-
     print("Готово.")
 
 
 if __name__ == "__main__":
     main()
-
