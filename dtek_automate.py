@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Оптимизированный скрипт автоматизации работы с сайтом DTEK
+"""
+
 import os
-import time
 import sys
-from pathlib import Path
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+import time
 import subprocess
+from pathlib import Path
+from typing import Optional
+from playwright.sync_api import sync_playwright, Locator, Page
 
-# === файл HTML, куда будет сохранён результат ===
+# Константы
 OUTPATH = Path("dtek_shutdowns.html")
-OUTPATH_NEXT_DAY = Path("dtek_shutdowns_next_day.html")
+URL = "https://www.dtek-dnem.com.ua/ua/shutdowns"
+HEADLESS = False
+DEFAULT_TIMEOUT = 5000
 
-# === playwright debug ===
-HEADLESS = False  # False → для визуальной отладки
 
-
-def safe_click(locator, timeout=3000):
+def safe_click(locator: Locator, timeout: int = 3000) -> bool:
+    """Безопасный клик по элементу"""
     try:
         locator.click(timeout=timeout)
         return True
@@ -23,196 +28,185 @@ def safe_click(locator, timeout=3000):
         return False
 
 
-def main():
-    # -----------------------------
-    #    ПАРАМЕТРЫ КОМАНДНОЙ СТРОКИ
-    # -----------------------------
-    # if len(sys.argv) != 4:
-    #    print("Использование:")
-    #    print("  python dtek_automate.py \"Город\" \"Улица\" \"Дом\"")
-    #    print()
-    #    print("Например:")
-    #    print("  python dtek_automate.py \"М. Дніпро\" \"просп. Героїв\" \"8\"")
-    #    sys.exit(1)
+def close_modal(page: Page) -> None:
+    """Закрытие модального окна предупреждения"""
+    selectors = [
+        "button.modal__close.m-attention__close",
+        "button[aria-label='close']",
+        "button[class*='modal__close']",
+    ]
 
-    CITY = os.getenv("CITY")
-    STREET = os.getenv("STREET")
-    HOUSE = os.getenv("HOUSE")
-    NEXT_DAY = os.getenv("NEXT_DAY", "0") == "1"
+    for selector in selectors:
+        try:
+            modal = page.locator(selector)
+            if modal.count() > 0:
+                safe_click(modal.first)
+                time.sleep(0.5)
+                return
+        except Exception:
+            continue
+
+
+def fill_autocomplete(page: Page, field_id: str, value: str, search_text: str) -> bool:
+    """Заполнение поля с автодополнением"""
+    try:
+        page.fill(f"#{field_id}", value)
+        page.wait_for_timeout(600)
+
+        # Попытка клика по выделенному элементу
+        strong = page.locator(f'strong:has-text("{search_text}")')
+        if strong.count() > 0:
+            strong.first.click(timeout=DEFAULT_TIMEOUT)
+            return True
+
+        # Fallback: клик по первому элементу списка
+        suggestions = page.locator("ul[role='listbox'] li")
+        if suggestions.count() > 0:
+            suggestions.first.click(timeout=DEFAULT_TIMEOUT)
+            return True
+
+        return False
+    except Exception as e:
+        print(f"⚠️ Ошибка при заполнении {field_id}: {e}")
+        return False
+
+
+def submit_form(page: Page) -> None:
+    """Отправка формы поиска"""
+    try:
+        submit_selectors = [
+            "button[type='submit']",
+            "button.search-button",
+            "button.btn--search",
+        ]
+
+        for selector in submit_selectors:
+            submit = page.locator(selector)
+            if submit.count() > 0:
+                submit.first.click(timeout=3000)
+                return
+
+        # Fallback: Enter в поле дома
+        page.press("#house_num", "Enter")
+    except Exception:
+        pass
+
+
+def wait_for_results(page: Page) -> None:
+    """Ожидание загрузки результатов"""
+    try:
+        page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        time.sleep(2)
+
+
+def save_html(page: Page, next_day: bool) -> None:
+    """Сохранение HTML страницы"""
+    if next_day:
+        try:
+            page.locator("div.date", has_text="на завтра").click()
+            time.sleep(1)
+        except Exception as e:
+            print(f"⚠️ Не удалось переключить на завтра: {e}")
+
+    html = page.content()
+    OUTPATH.write_text(html, encoding="utf-8")
+    print(f"✅ HTML сохранён в: {OUTPATH}")
+
+
+def run_parser() -> bool:
+    """Запуск локального парсера"""
+    commands = [
+        [sys.executable, "main", str(OUTPATH)],
+        [sys.executable, "main.py", str(OUTPATH)],
+        ["python3", "main.py", str(OUTPATH)],
+    ]
+
+    print("🔹 Запуск парсера...")
+
+    for cmd in commands:
+        try:
+            result = subprocess.run(
+                cmd, check=False, capture_output=True, text=True, timeout=120
+            )
+
+            if result.returncode == 0:
+                print(f"✅ Парсер выполнен: {' '.join(cmd)}")
+                return True
+
+            print(f"⚠️ Команда {' '.join(cmd)} вернула код {result.returncode}")
+
+        except FileNotFoundError:
+            continue
+        except subprocess.TimeoutExpired:
+            print("⚠️ Таймаут парсера (120s)")
+            continue
+        except Exception as e:
+            print(f"⚠️ Ошибка: {e}")
+            continue
+
+    print("❌ Не удалось запустить парсер автоматически")
+    return False
+
+
+def main():
+    # Получение параметров из окружения
+    city = os.getenv("CITY")
+    street = os.getenv("STREET")
+    house = os.getenv("HOUSE")
+    next_day = os.getenv("NEXT_DAY", "0") == "1"
+
+    if not all([city, street, house]):
+        print("❌ Ошибка: не заданы CITY, STREET или HOUSE")
+        sys.exit(1)
 
     print("🟦 Параметры автоматизации:")
-    print("   Город :", CITY)
-    print("   Улица :", STREET)
-    print("   Дом   :", HOUSE)
-    print()
-
-    URL = "https://www.dtek-dnem.com.ua/ua/shutdowns"
+    print(f"   Город: {city}")
+    print(f"   Улица: {street}")
+    print(f"   Дом: {house}")
+    print(f"   Завтра: {next_day}\n")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
         context = browser.new_context()
         page = context.new_page()
 
-        print("Открываю страницу...", URL)
+        print(f"🌐 Открываю {URL}")
         page.goto(URL, wait_until="domcontentloaded", timeout=30000)
 
-        # ---------------------------
-        #   Закрыть предупреждение
-        # ---------------------------
+        # Закрытие модального окна
+        close_modal(page)
+
+        # Заполнение формы
+        print(f"📝 Заполняю форму...")
+        fill_autocomplete(page, "city", city, city.split()[-1])
+        fill_autocomplete(page, "street", street, street.split()[0])
+
         try:
-            modal_btn = page.locator("button.modal__close.m-attention__close")
-            if modal_btn.count() > 0:
-                print("Закрываю предупреждение.")
-                safe_click(modal_btn.first)
-                time.sleep(0.5)
-            else:
-                alt = page.locator(
-                    "button[aria-label='close'], button[class*='modal__close']"
-                )
-                if alt.count() > 0:
-                    print("Закрываю альтернативное предупреждение.")
-                    safe_click(alt.first)
-        except Exception:
-            pass
-
-        # ---------------------------
-        #   ВВОД ГОРОДА
-        # ---------------------------
-        print(f"Ввожу город: {CITY}")
-        try:
-            page.fill("#city", CITY)
-            page.wait_for_timeout(600)
-
-            # strong с названием города
-            strong_city = page.locator(f'strong:has-text("{CITY.split()[-1]}")')
-            if strong_city.count() > 0:
-                strong_city.first.click(timeout=5000)
-            else:
-                # fallback – первый вариант
-                sugg = page.locator("ul[role='listbox'] li")
-                if sugg.count() > 0:
-                    sugg.first.click(timeout=5000)
-        except Exception as e:
-            print("Ошибка при выборе города:", e)
-
-        # ---------------------------
-        #   ВВОД УЛИЦЫ
-        # ---------------------------
-        print(f"Ввожу улицу: {STREET}")
-        try:
-            page.fill("#street", STREET)
-            page.wait_for_timeout(600)
-
-            strong_street = page.locator(f'strong:has-text("{STREET.split()[0]}")')
-            if strong_street.count() > 0:
-                strong_street.first.click(timeout=5000)
-            else:
-                sugg = page.locator("ul[role='listbox'] li")
-                if sugg.count() > 0:
-                    sugg.first.click(timeout=5000)
-        except Exception as e:
-            print("Ошибка при выборе улицы:", e)
-
-        # ---------------------------
-        #   ВВОД ДОМА
-        # ---------------------------
-        print(f"Ввожу дом: {HOUSE}")
-        try:
-            page.fill("#house_num", HOUSE)
+            page.fill("#house_num", house)
             page.wait_for_timeout(500)
 
-            sugg = page.locator("ul[role='listbox'] li")
-            if sugg.count() > 0:
-                sugg.first.click(timeout=4000)
+            suggestions = page.locator("ul[role='listbox'] li")
+            if suggestions.count() > 0:
+                suggestions.first.click(timeout=4000)
             else:
                 page.press("#house_num", "Enter")
         except Exception as e:
-            print("Ошибка при выборе дома:", e)
+            print(f"⚠️ Ошибка при вводе дома: {e}")
 
-        # ---------------------------
-        #   SUBMIT формы (если есть)
-        # ---------------------------
-        try:
-            submit = page.locator(
-                "button[type='submit'], button.search-button, button.btn--search"
-            )
-            if submit.count() > 0:
-                submit.first.click(timeout=3000)
-            else:
-                page.press("#house_num", "Enter")
-        except Exception:
-            pass
+        # Отправка формы
+        submit_form(page)
+        wait_for_results(page)
 
-        # Подождать обновления
-        try:
-            page.wait_for_load_state("networkidle", timeout=10000)
-        except Exception:
-            time.sleep(2)
-
-        # ---------------------------
-        #   СОХРАНЕНИЕ HTML
-        # ---------------------------
-        #
-        if NEXT_DAY:
-            page.locator("div.date", has_text="на завтра").click()
-            html_next = page.content()
-            OUTPATH.write_text(html_next, encoding="utf-8")
-            print(f"HTML на следующий день сохранён в: {OUTPATH}")
-        else:
-            html = page.content()
-            OUTPATH.write_text(html, encoding="utf-8")
-            print(f"HTML сохранён в: {OUTPATH}")
+        # Сохранение результата
+        save_html(page, next_day)
 
         context.close()
         browser.close()
 
-    # 7) Запускаем локальный парсер "main" (в текущей папке).
-    # Попробуем несколько вариантов вызова: sys.executable + 'main', затем 'main.py'
-    invoked = False
-    try_cmds = [
-        [sys.executable, "main", str(OUTPATH)],
-        [sys.executable, "main.py", str(OUTPATH)],
-        ["python", "main", str(OUTPATH)],
-        ["python3", "main", str(OUTPATH)],
-        ["python", "main.py", str(OUTPATH)],
-        ["python3", "main.py", str(OUTPATH)],
-    ]
-    print("Пробую запустить локальный парсер из текущей папки (main)...")
-    for cmd in try_cmds:
-        try:
-            print("Выполняю:", " ".join(cmd))
-            res = subprocess.run(
-                cmd, check=False, capture_output=True, text=True, timeout=120
-            )
-            print("--- STDOUT ---")
-            print(res.stdout.strip())
-            print("--- STDERR ---")
-            print(res.stderr.strip())
-            if res.returncode == 0:
-                print("Парсер успешно выполнился с командой:", " ".join(cmd))
-                invoked = True
-                break
-            else:
-                print(
-                    f"Команда вернула код {res.returncode}, пробую следующий вариант..."
-                )
-        except FileNotFoundError:
-            # интерпретатор/файл не найден — пробуем следующий
-            continue
-        except subprocess.TimeoutExpired:
-            print("Запуск парсера превысил таймаут (120s).")
-            continue
-        except Exception as e:
-            print("Ошибка при запуске парсера:", e)
-            continue
-
-    if not invoked:
-        print(
-            "Не удалось автоматически запустить 'main'. Убедитесь, что в текущей папке существует исполняемый файл 'main' или 'main.py'."
-        )
-        print("Вы можете вручную выполнить: python main /mnt/data/dtek_shutdowns.html")
-
-    print("Готово.")
+    # Запуск парсера
+    run_parser()
+    print("✅ Готово")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Полностью переписанный bot.py
-- если пользователя нет в БД -> просит ввести адрес (в личных сообщениях)
-- адрес отсылается админу с кнопкой "Дать доступ"
-- админ нажимает -> бот в личке у админа последовательно спрашивает: город -> улица -> дом
-- после ввода всех полей бот добавляет пользователя в sqlite и уведомляет его
-- админ не получает лишних сообщений (обработчики разделены)
+Оптимизированный Telegram бот для управления графиками отключений
 """
 
 import asyncio
@@ -14,7 +9,7 @@ import os
 import json
 import subprocess
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple, List
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
@@ -23,232 +18,122 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 
 from database import init_db, user_exists, add_user, get_user_address
 
-# Загружаем .env
+# Загрузка переменных окружения
 load_dotenv()
 
+# Константы
 API_TOKEN = os.getenv("API_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
-if ADMIN_ID is None:
-    raise RuntimeError("ADMIN_ID not set in environment")
-ADMIN_ID = int(ADMIN_ID)
+ADMIN_ID_STR = os.getenv("ADMIN_ID")
 
-if API_TOKEN is None:
+if not API_TOKEN:
     raise RuntimeError("API_TOKEN not set in environment")
+if not ADMIN_ID_STR:
+    raise RuntimeError("ADMIN_ID not set in environment")
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
+ADMIN_ID = int(ADMIN_ID_STR)
 
-# Пути и скрипты
+# Пути к файлам
 HTML_PATH = Path("dtek_shutdowns.html")
 JSON_PATH = Path("today_schedule.json")
 PNG_PATH = Path("today_schedule.png")
 AUTOMATE_SCRIPT = "dtek_automate.py"
-PARSER_SCRIPT = "main.py"
 
-# Инициализация БД
+# Инициализация бота
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
 init_db()
 
-# Временные структуры для ожиданий
-# pending_requests: { user_id: {"username": str, "address_raw": str} }
-pending_requests: Dict[int, Dict[str, Any]] = {}
-# pending_approvals: { admin_id: {"user_id": int, "stage": "city"/"street"/"house", "city":..., "street":...} }
+# Хранилище состояний
+pending_requests: Dict[int, Dict[str, str]] = {}
 pending_approvals: Dict[int, Dict[str, Any]] = {}
 
+# Клавиатуры
 kb_next_day = InlineKeyboardMarkup(
     inline_keyboard=[
-        [InlineKeyboardButton(text="График на завтра", callback_data="next_day")],
+        [InlineKeyboardButton(text="График на завтра", callback_data="next_day")]
     ]
 )
 
 
-def cleanup_old_files():
-    for f in [HTML_PATH, JSON_PATH, PNG_PATH]:
-        if f.exists():
-            try:
-                f.unlink()
-            except Exception:
-                pass
+def cleanup_files(*files: Path) -> None:
+    """Удаление файлов без ошибок"""
+    for file in files:
+        file.unlink(missing_ok=True)
 
 
-def run_automate_script(env: Dict[str, str]):
-    """Запускаем playwright-скрипт с подставленными переменными окружения."""
-    # передаём env copy, чтобы subprocess унаследовал CITY/STREET/HOUSE
-    proc_env = os.environ.copy()
-    proc_env.update(env)
+def run_automate_script(
+    city: str, street: str, house: str, next_day: bool = False
+) -> None:
+    """Запуск скрипта автоматизации с заданными параметрами"""
+    env = os.environ.copy()
+    env.update(
+        {
+            "CITY": city,
+            "STREET": street,
+            "HOUSE": house,
+            "NEXT_DAY": "1" if next_day else "0",
+        }
+    )
+
     print(
-        "Запускаю",
-        AUTOMATE_SCRIPT,
-        "с переменными",
-        {k: proc_env.get(k) for k in ("CITY", "STREET", "HOUSE")},
+        f"🔹 Запуск {AUTOMATE_SCRIPT}: {city}, {street}, {house}, next_day={next_day}"
     )
+
     result = subprocess.run(
-        ["python3", AUTOMATE_SCRIPT], capture_output=True, text=True, env=proc_env
+        ["python3", AUTOMATE_SCRIPT], capture_output=True, text=True, env=env
     )
-    print("automate stdout:", result.stdout)
-    print("automate stderr:", result.stderr)
+
+    if result.returncode != 0:
+        print(f"⚠️ Stderr: {result.stderr}")
 
 
-def read_schedule(json_path: Path):
+def read_schedule(json_path: Path = JSON_PATH) -> Optional[List[Dict[str, str]]]:
+    """Чтение графика из JSON файла"""
     if not json_path.exists():
         return None
-    return json.loads(json_path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(json_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Ошибка чтения JSON: {e}")
+        return None
 
 
-def extract_off_intervals(schedule):
+def extract_off_intervals(schedule: List[Dict[str, str]]) -> List[Tuple[str, str]]:
+    """Извлечение интервалов отключения света"""
     off_blocks = []
-    current_block_start = None
+    current_start = None
     prev_end = None
 
     for item in schedule:
         start, end = item["interval"].split("-")
+
         if item["status"] == "off":
-            if current_block_start is None:
-                current_block_start = start
+            if current_start is None:
+                current_start = start
             prev_end = end
         else:
-            if current_block_start is not None:
-                off_blocks.append((current_block_start, prev_end))
-                current_block_start = None
+            if current_start is not None:
+                off_blocks.append((current_start, prev_end))
+                current_start = None
 
-    if current_block_start is not None:
-        off_blocks.append((current_block_start, prev_end))
+    if current_start is not None:
+        off_blocks.append((current_start, prev_end))
 
     return off_blocks
 
 
-@dp.message(CommandStart())
-async def start_cmd(message: types.Message):
-    # работаем только в личных сообщениях
-    if message.chat.type != "private":
-        await message.reply("Пожалуйста, пишите боту в личные сообщения.")
-        return
-
-    user_id = message.from_user.id
-
-    # Если пользователь НЕ зарегистрирован — просим адрес
-    if not user_exists(user_id):
-        await message.answer(
-            "Перед началом использования введите ваш адрес:\n"
-            "Название города или села, улица, номер дома"
-        )
-        return
-
-    # Получаем разложенный адрес из базы
-    addr = get_user_address(user_id)
-    if not addr:
-        await message.answer("Ошибка: не удалось получить адрес из базы.")
-        return
-
-    city, street, house = addr
-
-    await message.answer("⏳ Обновляю данные...")
-
-    # Очищаем старые файлы
-    cleanup_old_files()
-
-    # Запускаем automate с нужными переменными
-    env = {"CITY": city, "STREET": street, "HOUSE": house, "NEXT_DAY": "0"}
-    run_automate_script(env)
-
-    schedule = read_schedule(JSON_PATH)
-    if not schedule:
-        await message.answer("Ошибка: не удалось получить график.")
-        return
-
-    off_times = extract_off_intervals(schedule)
+def format_schedule(off_times: List[Tuple[str, str]], is_tomorrow: bool = False) -> str:
+    """Форматирование графика для отображения"""
     if not off_times:
-        await message.answer("Отключений света не запланировано на сегодня.")
-        return
+        return "Отключений света не запланировано."
 
-    result_parts = [f"с {start} до {end}" for start, end in off_times]
-    result_text = "Света не будет: " + ", ".join(result_parts)
-    await message.answer(result_text, reply_markup=kb_next_day)
+    prefix = "Завтра света не будет: " if is_tomorrow else "Света не будет: "
+    intervals = ", ".join(f"с {start} до {end}" for start, end in off_times)
+    return prefix + intervals
 
 
-@dp.message()
-async def handle_messages(message: types.Message):
-    """Главный обработчик входящих сообщений.
-
-    Поведение:
-    - если это админ и у него активный pending_approvals -> трактуем сообщение как ответ (city/street/house)
-    - иначе если это НЕ админ и пользователь не в БД -> трактуем сообщение как заявка-адрес и шлём админу
-    - в других случаях игнорируем/не перепутываем
-    """
-    # только личные сообщения
-    if message.chat.type != "private":
-        return
-
-    user_id = message.from_user.id
-
-    # ------------------- Админская логика -------------------
-    if user_id == ADMIN_ID:
-        # есть ли у админа активное одобрение
-        if ADMIN_ID in pending_approvals:
-            state = pending_approvals[ADMIN_ID]
-            stage = state.get("stage")
-
-            if stage == "city":
-                state["city"] = message.text.strip()
-                state["stage"] = "street"
-                await message.answer("Введите улицу:")
-                return
-
-            if stage == "street":
-                state["street"] = message.text.strip()
-                state["stage"] = "house"
-                await message.answer("Введите номер дома:")
-                return
-
-            if stage == "house":
-                state["house"] = message.text.strip()
-                target_user = state.get("user_id")
-                username = state.get("username")
-
-                # добавляем в базу
-                add_user(
-                    target_user,
-                    username or "",
-                    state.get("city", ""),
-                    state.get("street", ""),
-                    state.get("house", ""),
-                )
-
-                # чистим state
-                del pending_approvals[ADMIN_ID]
-
-                await message.answer(
-                    f"Пользователь {target_user} добавлен в базу данных 🎉"
-                )
-
-                # уведомляем пользователя
-                try:
-                    await bot.send_message(
-                        target_user, "Ваши данные обработаны. Нажмите /start."
-                    )
-                except Exception:
-                    # пользователь мог удалить бота или заблокировать
-                    await message.answer(
-                        "Не удалось уведомить пользователя (возможно он заблокировал бота)."
-                    )
-                return
-
-        # если у админа нет активного ожидания — игнорируем
-        return
-
-    # ------------------- Пользовательская логика -------------------
-    # если пользователь уже в БД — не считаем это заявкой
-    if user_exists(user_id):
-        # ничего не делаем (или можно обрабатывать другие команды)
-        return
-
-    # иначе — принимаем это сообщение как адрес-заявку (одной строкой)
-    address_raw = message.text.strip()
-    username = message.from_user.username or f"id{user_id}"
-
-    # сохраняем временно
-    pending_requests[user_id] = {"username": username, "address_raw": address_raw}
-
-    # формируем кнопку для админа
+async def send_admin_notification(user_id: int, username: str, address: str) -> bool:
+    """Отправка уведомления админу о новой заявке"""
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -259,98 +144,194 @@ async def handle_messages(message: types.Message):
         ]
     )
 
-    # отправляем админу
     try:
         await bot.send_message(
             ADMIN_ID,
-            f"Новая заявка!\n ID: {user_id}\n Username: @{username}\n Адрес (raw): {address_raw}",
+            f"Новая заявка!\nID: {user_id}\nUsername: @{username}\nАдрес: {address}",
             reply_markup=kb,
         )
+        return True
     except Exception as e:
-        # если не получилось отправить админу — сообщаем пользователю и логируем
+        print(f"❌ Ошибка отправки админу: {e}")
+        return False
+
+
+async def notify_user(user_id: int, message: str) -> bool:
+    """Уведомление пользователя"""
+    try:
+        await bot.send_message(user_id, message)
+        return True
+    except Exception as e:
+        print(f"❌ Не удалось уведомить пользователя {user_id}: {e}")
+        return False
+
+
+async def process_schedule_request(
+    message: types.Message, city: str, street: str, house: str, next_day: bool = False
+) -> None:
+    """Обработка запроса графика"""
+    await message.answer(
+        "⏳ Обновляю данные..." if not next_day else "⏳ Загружаю график на завтра..."
+    )
+
+    cleanup_files(HTML_PATH, JSON_PATH, PNG_PATH)
+    run_automate_script(city, street, house, next_day)
+
+    schedule = read_schedule()
+    if not schedule:
+        await message.answer("Ошибка: не удалось получить график.")
+        return
+
+    off_times = extract_off_intervals(schedule)
+
+    if not off_times and next_day:
+        await message.answer(
+            "График отключений на завтрашний день еще не опубликован. "
+            "Повторите ваш запрос позже."
+        )
+        return
+
+    result_text = format_schedule(off_times, next_day)
+    reply_markup = kb_next_day if not next_day else None
+    await message.answer(result_text, reply_markup=reply_markup)
+
+
+# ==================== ОБРАБОТЧИКИ ====================
+
+
+@dp.message(CommandStart())
+async def start_cmd(message: types.Message):
+    """Обработчик команды /start"""
+    if message.chat.type != "private":
+        await message.reply("Пожалуйста, пишите боту в личные сообщения.")
+        return
+
+    user_id = message.from_user.id
+
+    if not user_exists(user_id):
+        await message.answer(
+            "Перед началом использования введите ваш адрес:\n"
+            "Название города или села, улица, номер дома"
+        )
+        return
+
+    addr = get_user_address(user_id)
+    if not addr:
+        await message.answer("Ошибка: не удалось получить адрес из базы.")
+        return
+
+    await process_schedule_request(message, *addr)
+
+
+@dp.message()
+async def handle_messages(message: types.Message):
+    """Обработчик всех текстовых сообщений"""
+    if message.chat.type != "private":
+        return
+
+    user_id = message.from_user.id
+
+    # Логика для админа
+    if user_id == ADMIN_ID and ADMIN_ID in pending_approvals:
+        await handle_admin_input(message)
+        return
+
+    # Логика для пользователя
+    if not user_exists(user_id):
+        await handle_user_request(message)
+
+
+async def handle_admin_input(message: types.Message):
+    """Обработка ввода данных админом"""
+    state = pending_approvals[ADMIN_ID]
+    stage = state.get("stage")
+    text = message.text.strip()
+
+    if stage == "city":
+        state["city"] = text
+        state["stage"] = "street"
+        await message.answer("Введите улицу:")
+
+    elif stage == "street":
+        state["street"] = text
+        state["stage"] = "house"
+        await message.answer("Введите номер дома:")
+
+    elif stage == "house":
+        state["house"] = text
+        target_user = state["user_id"]
+        username = state.get("username", "")
+
+        add_user(target_user, username, state["city"], state["street"], text)
+        del pending_approvals[ADMIN_ID]
+
+        await message.answer(f"Пользователь {target_user} добавлен в базу данных 🎉")
+
+        if not await notify_user(
+            target_user, "Ваши данные обработаны. Нажмите /start."
+        ):
+            await message.answer(
+                "Не удалось уведомить пользователя (возможно он заблокировал бота)."
+            )
+
+
+async def handle_user_request(message: types.Message):
+    """Обработка заявки от пользователя"""
+    user_id = message.from_user.id
+    username = message.from_user.username or f"id{user_id}"
+    address = message.text.strip()
+
+    pending_requests[user_id] = {"username": username, "address_raw": address}
+
+    if await send_admin_notification(user_id, username, address):
+        await message.answer("Ваш индивидуальный график обрабатывается ✅")
+    else:
         await message.answer(
             "Ваш индивидуальный график не удалось обработать. Попробуйте позже ❌"
         )
-        print("Failed to send admin message:", e)
-        return
-
-    await message.answer("Ваш индивидуальный график обрабатывается ✅")
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("approve_"))
 async def approve_callback(callback: CallbackQuery):
-    """Обработка нажатия админом кнопки 'Дать доступ'"""
-    # только админ может нажимать
-    from_user = callback.from_user
-    if from_user.id != ADMIN_ID:
+    """Обработка одобрения заявки админом"""
+    if callback.from_user.id != ADMIN_ID:
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    # извлекаем user_id из callback
     try:
         target_user_id = int(callback.data.split("_")[1])
-    except Exception:
+    except (IndexError, ValueError):
         await callback.answer("Некорректные данные")
         return
 
-    # есть ли такая pending заявка?
     if target_user_id not in pending_requests:
         await callback.answer("Заявка не найдена или уже обработана.")
         return
 
-    # готовим state для админа
     req = pending_requests[target_user_id]
     pending_approvals[ADMIN_ID] = {
         "user_id": target_user_id,
-        "username": req.get("username"),
+        "username": req["username"],
         "stage": "city",
     }
 
-    # можно удалить pending_requests — но лучше оставить до полного завершения
-    # pending_requests.pop(target_user_id, None)
-
-    # спрашиваем у админа город
     await callback.message.answer("Введите город:")
     await callback.answer()
 
 
 @dp.callback_query(lambda c: c.data == "next_day")
 async def next_day_callback(callback: CallbackQuery):
-    await callback.message.answer("⏳ Загружаю график на завтра...")
-
+    """Обработка запроса графика на завтра"""
     addr = get_user_address(callback.from_user.id)
     if not addr:
         await callback.message.answer("Ошибка: не удалось получить адрес из базы.")
         return
 
-    city, street, house = addr
-
-    # Очищаем старые файлы
-    cleanup_old_files()
-
-    # Запускаем automate с нужными переменными
-    env = {"CITY": city, "STREET": street, "HOUSE": house, "NEXT_DAY": "1"}
-    run_automate_script(env)
-
-    schedule = read_schedule(JSON_PATH)
-    if not schedule:
-        await callback.message.answer("Ошибка: не удалось получить график.")
-        return
-
-    off_times = extract_off_intervals(schedule)
-    if not off_times:
-        await callback.message.answer(
-            "График отключений на завтрашний день еще не опубликован. Повторите ваш запрос позже."
-        )
-        return
-
-    result_parts = [f"с {start} до {end}" for start, end in off_times]
-    result_text = "Завтра света не будет: " + ", ".join(result_parts)
-    await callback.message.answer(result_text)
+    await process_schedule_request(callback.message, *addr, next_day=True)
 
 
 async def main():
-    print("Bot started")
+    print("🤖 Bot started")
     await dp.start_polling(bot)
 
 
