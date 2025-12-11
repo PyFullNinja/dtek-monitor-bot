@@ -14,7 +14,6 @@ from playwright.sync_api import sync_playwright, Locator, Page
 
 # Константы
 OUTPATH = Path("dtek_shutdowns.html")
-URL = "https://www.dtek-dnem.com.ua/ua/shutdowns"
 HEADLESS = False
 DEFAULT_TIMEOUT = 5000
 
@@ -154,13 +153,15 @@ def main():
     city = os.getenv("CITY")
     street = os.getenv("STREET")
     house = os.getenv("HOUSE")
+    url = os.getenv("URL")
     next_day = os.getenv("NEXT_DAY", "0") == "1"
 
-    if not all([city, street, house]):
-        print("❌ Ошибка: не заданы CITY, STREET или HOUSE")
+    if not all([city, street, house, url]):
+        print("❌ Ошибка: не заданы CITY, STREET, HOUSE или URL")
         sys.exit(1)
 
     print("🟦 Параметры автоматизации:")
+    print(f"   URL: {url}")
     print(f"   Город: {city}")
     print(f"   Улица: {street}")
     print(f"   Дом: {house}")
@@ -171,8 +172,8 @@ def main():
         context = browser.new_context()
         page = context.new_page()
 
-        print(f"🌐 Открываю {URL}")
-        page.goto(URL, wait_until="domcontentloaded", timeout=30000)
+        print(f"🌐 Открываю {url}")
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
         # Закрытие модального окна
         close_modal(page)

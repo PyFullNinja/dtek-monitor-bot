@@ -47,6 +47,9 @@ init_db()
 pending_requests: Dict[int, Dict[str, str]] = {}
 pending_approvals: Dict[int, Dict[str, Any]] = {}
 
+# Этапы одобрения
+APPROVAL_STAGES = ["url", "city", "street", "house"]
+
 # Клавиатуры
 kb_next_day = InlineKeyboardMarkup(
     inline_keyboard=[
@@ -62,7 +65,7 @@ def cleanup_files(*files: Path) -> None:
 
 
 def run_automate_script(
-    city: str, street: str, house: str, next_day: bool = False
+    city: str, street: str, house: str, url: str, next_day: bool = False
 ) -> None:
     """Запуск скрипта автоматизации с заданными параметрами"""
     env = os.environ.copy()
@@ -71,12 +74,13 @@ def run_automate_script(
             "CITY": city,
             "STREET": street,
             "HOUSE": house,
+            "URL": url,
             "NEXT_DAY": "1" if next_day else "0",
         }
     )
 
     print(
-        f"🔹 Запуск {AUTOMATE_SCRIPT}: {city}, {street}, {house}, next_day={next_day}"
+        f"🔹 Запуск {AUTOMATE_SCRIPT}: {city}, {street}, {house}, URL: {url}, next_day={next_day}"
     )
 
     result = subprocess.run(
@@ -167,7 +171,12 @@ async def notify_user(user_id: int, message: str) -> bool:
 
 
 async def process_schedule_request(
-    message: types.Message, city: str, street: str, house: str, next_day: bool = False
+    message: types.Message,
+    city: str,
+    street: str,
+    house: str,
+    url: str,
+    next_day: bool = False,
 ) -> None:
     """Обработка запроса графика"""
     await message.answer(
@@ -175,7 +184,7 @@ async def process_schedule_request(
     )
 
     cleanup_files(HTML_PATH, JSON_PATH, PNG_PATH)
-    run_automate_script(city, street, house, next_day)
+    run_automate_script(city, street, house, url, next_day)
 
     schedule = read_schedule()
     if not schedule:
@@ -247,7 +256,12 @@ async def handle_admin_input(message: types.Message):
     stage = state.get("stage")
     text = message.text.strip()
 
-    if stage == "city":
+    if stage == "url":
+        state["url"] = text
+        state["stage"] = "city"
+        await message.answer("Введите город:")
+
+    elif stage == "city":
         state["city"] = text
         state["stage"] = "street"
         await message.answer("Введите улицу:")
@@ -261,8 +275,17 @@ async def handle_admin_input(message: types.Message):
         state["house"] = text
         target_user = state["user_id"]
         username = state.get("username", "")
+        full_name = state.get("full_name", "")
 
-        add_user(target_user, username, state["city"], state["street"], text)
+        add_user(
+            target_user,
+            username,
+            full_name,
+            state["city"],
+            state["street"],
+            text,
+            state["url"],
+        )
         del pending_approvals[ADMIN_ID]
 
         await message.answer(f"Пользователь {target_user} добавлен в базу данных 🎉")
@@ -279,9 +302,14 @@ async def handle_user_request(message: types.Message):
     """Обработка заявки от пользователя"""
     user_id = message.from_user.id
     username = message.from_user.username or f"id{user_id}"
+    full_name = message.from_user.full_name or ""
     address = message.text.strip()
 
-    pending_requests[user_id] = {"username": username, "address_raw": address}
+    pending_requests[user_id] = {
+        "username": username,
+        "full_name": full_name,
+        "address_raw": address,
+    }
 
     if await send_admin_notification(user_id, username, address):
         await message.answer("Ваш индивидуальный график обрабатывается ✅")
@@ -312,10 +340,13 @@ async def approve_callback(callback: CallbackQuery):
     pending_approvals[ADMIN_ID] = {
         "user_id": target_user_id,
         "username": req["username"],
-        "stage": "city",
+        "full_name": req["full_name"],
+        "stage": "url",
     }
 
-    await callback.message.answer("Введите город:")
+    await callback.message.answer(
+        "Введите URL сайта для парсинга (например: https://www.dtek-dnem.com.ua/ua/shutdowns):"
+    )
     await callback.answer()
 
 

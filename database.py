@@ -17,17 +17,37 @@ def get_db_connection():
 
 
 def init_db():
-    """Инициализация базы данных"""
+    """Инициализация базы данных с миграциями"""
     with get_db_connection() as conn:
+        # Создание таблицы если не существует
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
+                full_name TEXT,
                 city TEXT,
                 street TEXT,
-                house TEXT
+                house TEXT,
+                url TEXT
             )
         """)
+
+        # Проверка и добавление отсутствующих колонок (миграция)
+        cursor = conn.execute("PRAGMA table_info(users)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        # Добавляем full_name если отсутствует
+        if "full_name" not in columns:
+            print("🔄 Миграция: добавление колонки full_name")
+            conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+
+        # Добавляем url если отсутствует
+        if "url" not in columns:
+            print("🔄 Миграция: добавление колонки url")
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN url TEXT DEFAULT 'https://www.dtek-dnem.com.ua/ua/shutdowns'"
+            )
+
         conn.commit()
 
 
@@ -40,23 +60,31 @@ def user_exists(user_id: int) -> bool:
         return result is not None
 
 
-def get_user_address(user_id: int) -> Optional[Tuple[str, str, str]]:
-    """Получение адреса пользователя"""
+def get_user_address(user_id: int) -> Optional[Tuple[str, str, str, str]]:
+    """Получение данных пользователя (city, street, house, url)"""
     with get_db_connection() as conn:
         result = conn.execute(
-            "SELECT city, street, house FROM users WHERE user_id = ?", (user_id,)
+            "SELECT city, street, house, url FROM users WHERE user_id = ?", (user_id,)
         ).fetchone()
         return result
 
 
-def add_user(user_id: int, username: str, city: str, street: str, house: str):
+def add_user(
+    user_id: int,
+    username: str,
+    full_name: str,
+    city: str,
+    street: str,
+    house: str,
+    url: str,
+):
     """Добавление или обновление пользователя"""
     with get_db_connection() as conn:
         conn.execute(
             """
-            INSERT OR REPLACE INTO users (user_id, username, city, street, house)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO users (user_id, username, full_name, city, street, house, url)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-            (user_id, username, city, street, house),
+            (user_id, username, full_name, city, street, house, url),
         )
         conn.commit()
