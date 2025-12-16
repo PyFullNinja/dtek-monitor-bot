@@ -121,8 +121,10 @@ def parse_file(path: str) -> List[Dict[str, str]]:
     headers = extract_headers(table)
     current_row = find_current_day_row(table)
 
-    # Извлечение ячеек (пропускаем первые 2 - день недели)
-    cells = current_row.find_all("td")[2:]
+    # Извлечение ячеек, учитывая служебные колонки в начале строки
+    cells = current_row.find_all("td")
+    extra_cells = max(0, len(cells) - len(headers))
+    cells = cells[extra_cells:]
 
     # Согласование количества ячеек и заголовков
     min_len = min(len(cells), len(headers))
@@ -134,7 +136,7 @@ def parse_file(path: str) -> List[Dict[str, str]]:
     for i, header in enumerate(headers):
         # Извлечение часа из заголовка (например, "00-01" -> 1)
         try:
-            hour = int(header.split("-")[0]) + 1
+            hour = int(header.split("-")[0])
         except (ValueError, IndexError):
             hour = i
 

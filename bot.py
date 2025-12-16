@@ -17,6 +17,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 from database import init_db, user_exists, add_user, get_user_address
+from cache import schedule_cache
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -24,6 +25,7 @@ load_dotenv()
 # Константы
 API_TOKEN = os.getenv("API_TOKEN")
 ADMIN_ID_STR = os.getenv("ADMIN_ID")
+
 
 if not API_TOKEN:
     raise RuntimeError("API_TOKEN not set in environment")
@@ -64,31 +66,37 @@ def cleanup_files(*files: Path) -> None:
         file.unlink(missing_ok=True)
 
 
-def run_automate_script(
-    city: str, street: str, house: str, url: str, next_day: bool = False
-) -> None:
-    """Запуск скрипта автоматизации с заданными параметрами"""
-    env = os.environ.copy()
-    env.update(
-        {
-            "CITY": city,
-            "STREET": street,
-            "HOUSE": house,
-            "URL": url,
-            "NEXT_DAY": "1" if next_day else "0",
-        }
-    )
-
-    print(
-        f"🔹 Запуск {AUTOMATE_SCRIPT}: {city}, {street}, {house}, URL: {url}, next_day={next_day}"
-    )
-
-    result = subprocess.run(
-        ["python3", AUTOMATE_SCRIPT], capture_output=True, text=True, env=env
-    )
-
-    if result.returncode != 0:
-        print(f"⚠️ Stderr: {result.stderr}")
+def run_automate_script(city: str, street: str, house: str, url: str, next_day: bool = False) -> bool:
+    """Запуск скрипта автоматизации с обработкой ошибок"""
+    try:
+        cmd = [
+            "python3",
+            AUTOMATE_SCRIPT,
+            f'--city="{city}"',
+            f'--street="{street}"',
+            f'--house="{house}"',
+            f'--url="{url}"'
+        ]
+        
+        if next_day:
+            cmd.append("--next-day")
+            
+        result = subprocess.run(
+            " ".join(cmd),
+            shell=True,
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        print(f"Automation script output: {result.stdout}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error running automation script: {e}")
+        print(f"Stderr: {e.stderr}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return False
 
 
 def read_schedule(json_path: Path = JSON_PATH) -> Optional[List[Dict[str, str]]]:
@@ -178,31 +186,46 @@ async def process_schedule_request(
     url: str,
     next_day: bool = False,
 ) -> None:
-    """Обработка запроса графика"""
+    """Обработка запроса графика с кэшированием"""
+    # 1. Сначала проверяем кэш
+    cached_schedule = schedule_cache.get(city, street, house, url, next_day)
+    
+    if cached_schedule is not None:
+        print(f"Используем кэшированные данные для {city}, {street}, {house}")
+        off_times = extract_off_intervals(cached_schedule)
+        result_text = format_schedule(off_times, next_day)
+        reply_markup = kb_next_day if not next_day else None
+        await message.answer(result_text, reply_markup=reply_markup)
+        return
+
+    # 2. Если в кэше нет, загружаем данные
     await message.answer(
         "⏳ Обновляю данные..." if not next_day else "⏳ Загружаю график на завтра..."
     )
 
+    # 3. Запускаем парсинг
     cleanup_files(HTML_PATH, JSON_PATH, PNG_PATH)
-    run_automate_script(city, street, house, url, next_day)
+    success = run_automate_script(city, street, house, url, next_day)
+    
+    if not success:
+        await message.answer("❌ Не удалось загрузить данные. Попробуйте позже.")
+        return
 
+    # 4. Читаем и парсим данные
     schedule = read_schedule()
     if not schedule:
-        await message.answer("Ошибка: не удалось получить график.")
+        await message.answer("❌ Не удалось прочитать расписание.")
         return
 
+    # 5. Сохраняем в кэш
+    schedule_cache.set(city, street, house, url, schedule, next_day)
+    
+    # 6. Формируем и отправляем ответ
     off_times = extract_off_intervals(schedule)
-
-    if not off_times and next_day:
-        await message.answer(
-            "График отключений на завтрашний день еще не опубликован. "
-            "Повторите ваш запрос позже."
-        )
-        return
-
     result_text = format_schedule(off_times, next_day)
     reply_markup = kb_next_day if not next_day else None
     await message.answer(result_text, reply_markup=reply_markup)
+
 
 
 # ==================== ОБРАБОТЧИКИ ====================
